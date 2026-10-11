@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# PlatformIO build artifacts & local cache
+.pio/
+.pioenvs/
+.piolibdeps/
+firmware/.pio/
+firmware/.pioenvs/
+firmware/.piolibdeps/
+
+# IDE / Editor folders
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+
+# Temporary audio test recordings / scratch files
+*.wav
+*.mp3
+/tmp/
+audio/test_speech.pcm
+
+# Credentials / Local config overrides
+config.local.*
+secrets.h
+.env
+*.local
