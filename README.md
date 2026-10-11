@@ -1,64 +1,82 @@
-# Rotary Telephone AI Assistant - Audio Loopback Test
+# Retro AI Rotary Phone Assistant
 
-This project contains the ESP32-S3 firmware and a Python diagnostic script to test and verify the microphone, earpiece, and hook switch on your vintage Elektrisk Bureau rotary telephone.
+Turn a vintage 1970s Norwegian **Elektrisk Bureau** rotary phone into an interactive voice assistant powered by an ESP32-S3 and Google Gemini.
+
+📖 **Read the full story & deep dive on the blog:**  
+👉 [**I turned a retro rotary phone into an AI voice assistant**](https://pharzan.com/posts/retro-ai-rotary-phone/)
 
 ---
 
-## 1. Hardware Pinout Reference
+<p align="center">
+  <img src="images/retro-ai-rotary-phone.jpg" alt="Vintage Elektrisk Bureau Rotary Phone AI Assistant" width="600" />
+</p>
+
+## Overview
+
+Not another sterile smart speaker that listens to you 24/7. This is a true physical landline interface:
+
+1. **Ask a question** via your terminal using `python phone_assistant.py "..."`.
+2. **Instant AI response:** Generates a spoken response with Gemini Flash and downsamples neural speech to authentic 8 kHz PCM audio.
+3. **The phone rings:** A buzzer inside fires with the classic European dual-pulse cadence (*ring-ring... ring-ring*).
+4. **Pickup:** You lift the heavy handset off the spring-loaded brass cradle. The ESP32 detects the off-hook state, immediately silences the ringer, and begins streaming audio.
+5. **Listen & Hang Up:** You hear the answer through the vintage 200Ω magnetic receiver in the earpiece—sounding just like a 1970s switchboard operator. Slam the handset down to cut off the call mid-sentence.
+
+---
+
+## Hardware & Architecture
+
+<p align="center">
+  <img src="images/multimeter-probing-terminals.jpg" width="48%" alt="Probing internal leaf switch and screw terminals" />
+  <img src="images/vintage-earpiece-receiver.jpg" width="48%" alt="ESP32-S3 wired to MAX98357A I2S DAC" />
+</p>
+
+### Pinout Reference (ESP32-S3)
 
 | Component | Signal | ESP32-S3 Pin | Notes |
 | :--- | :--- | :--- | :--- |
 | **MAX98357A I2S DAC** | BCLK | **GPIO 5** | Bit Clock |
-| | LRC / WS | **GPIO 6** | Left/Right Clock (8 kHz) |
+| | LRC / WS | **GPIO 6** | Left/Right Word Select (8 kHz) |
 | | DIN | **GPIO 7** | Serial Audio Data |
-| | VIN / GND | **5V / GND** | Standard power connection |
-| **Carbon Microphone** | Bias Output | **GPIO 4** | ADC1 Channel 3 (DC offset removed via EMA filter) |
-| | Bias Resistor | 330Ω to 3.3V | Other lead of mic to GND |
-| **Hook Switch** | Leaf Switch | **GPIO 15** | Connected between GPIO 15 and GND (`INPUT_PULLUP`) |
+| | VIN / GND | **5V / GND** | Power supply |
+| **Hook Switch (Cradle)** | Voltage Divider | **GPIO 1 (ADC1)** | 300Ω pull-up to 3.3V, phone contacts to GND |
+| **Buzzer / Ringer** | Signal | **GPIO 16** | Fired during incoming calls |
+| **Earpiece Receiver** | Audio +/- | DAC Out (+/-) | Directly drives vintage 200Ω magnetic capsule |
+
+> **Note on Cradle ADC:** The vintage leaf switch inside was riveted and connected in circuit with transformers and coils, reading 16Ω (handset up) vs 1.6kΩ (handset down). Using a 300Ω pull-up into ADC1 (GPIO 1) produces rock-solid voltage readings (~0.16V lifted vs ~0.52V cradle) with firmware hysteresis.
 
 ---
 
-## 2. Firmware (ESP32-S3)
+## Getting Started
 
-Located in `firmware/`:
-- **ADC Sampling**: Samples GPIO 4 at 8000 Hz using high-resolution `esp_timer`.
-- **DC Offset Removal**: Tracks dynamic bias voltage with an exponential running average filter ($raw - DC$) and scales with gain.
-- **I2S Output**: Direct ESP-IDF `driver/i2s.h` stereo stream to the MAX98357A.
-- **USB CDC Serial**: Communicates audio bytes and hook switch state changes at **921600 baud**.
+### 1. Flash the Firmware
+The ESP32-S3 firmware is located in `firmware/` (PlatformIO project):
 
-### Flashing the Firmware
+1. Set your Wi-Fi credentials in `firmware/src/main.cpp`.
+2. Build and upload:
+   ```bash
+   cd firmware
+   pio run -t upload
+   ```
 
-```bash
-cd /home/pharzan/Projects/rotary-phone-assistant/firmware
-pio run -t upload
-```
+### 2. Run the Assistant
 
-*(Or open `/home/pharzan/Projects/rotary-phone-assistant/firmware` in VS Code / PlatformIO / Arduino IDE).*
+1. Setup Python environment:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt # or pyserial numpy edge-tts
+   ```
+
+2. Ask a question:
+   ```bash
+   python python/phone_assistant.py "Why were rotary dials invented?"
+   ```
+
+3. The vintage phone will start ringing—lift the handset to listen!
 
 ---
 
-## 3. Python Loopback Script
+## Blog & Writeup
 
-Located in `python/loopback_test.py`.
-
-A virtual environment is set up at `/home/pharzan/Projects/rotary-phone-assistant/.venv` with `pyserial` and `numpy`.
-
-### Running Modes
-
-1. **Full USB Audio Loopback (Mic -> Host -> Earpiece)**:
-   ```bash
-   /home/pharzan/Projects/rotary-phone-assistant/.venv/bin/python /home/pharzan/Projects/rotary-phone-assistant/python/loopback_test.py --mode loopback
-   ```
-   *Speak into the transmitter: you will hear your voice in the earpiece.*
-
-2. **Earpiece Test Tone (Dial Tone)**:
-   ```bash
-   /home/pharzan/Projects/rotary-phone-assistant/.venv/bin/python /home/pharzan/Projects/rotary-phone-assistant/python/loopback_test.py --mode tone
-   ```
-   *Generates a 425 Hz continuous telephone dial tone and plays it through the earpiece.*
-
-3. **Microphone VU Meter / Level Monitor**:
-   ```bash
-   /home/pharzan/Projects/rotary-phone-assistant/.venv/bin/python /home/pharzan/Projects/rotary-phone-assistant/python/loopback_test.py --mode monitor
-   ```
-   *Visualizes live RMS audio level bars on your terminal as you speak or tap the microphone.*
+For full schematics, the leaf switch discovery story, and audio engineering details, read the post:  
+👉 [**https://pharzan.com/posts/retro-ai-rotary-phone/**](https://pharzan.com/posts/retro-ai-rotary-phone/)

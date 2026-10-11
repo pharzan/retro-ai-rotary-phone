@@ -49,6 +49,10 @@ static volatile bool is_ringing = false;
 static uint32_t ring_cycle_timer = 0;
 static bool buzzer_sound_active = false;
 static bool stable_picked_up = false;
+static bool call_in_progress = false; // True when answering a ring until hung up
+static bool is_call_ended = false;    // Disconnect tone (busy beeps)
+static uint32_t busy_tone_timer = 0;
+static uint32_t last_audio_packet_time = 0;
 
 static void set_buzzer_state(bool on) {
     if (on) {
@@ -169,11 +173,20 @@ void loop() {
                           stable_picked_up ? "OFF-HOOK (PICKED UP!)" : "ON-HOOK (ON CRADLE)",
                           adc);
 
-            // If user picks up while ringing, silence ringer immediately
+            // If user picks up while ringing, silence ringer immediately and enter call mode (no dial tone!)
             if (stable_picked_up && is_ringing) {
                 is_ringing = false;
+                call_in_progress = true;
                 set_buzzer_state(false);
-                Serial.println("[RINGER] User answered call! Buzzer silenced.");
+                Serial.println("[RINGER] User answered call! Buzzer silenced, call in progress.");
+            }
+
+            // If user hangs up on cradle, stop all tones and reset call state
+            if (!stable_picked_up) {
+                is_call_ended = false;
+                call_in_progress = false;
+                i2s_zero_dma_buffer(I2S_NUM);
+                Serial.println("[HOOK] Handset hung up! Disconnect tone stopped.");
             }
 
             // Notify PC controller over UDP
@@ -226,6 +239,8 @@ void loop() {
             if (cmd == "RING:START") {
                 if (!stable_picked_up) {
                     is_ringing = true;
+                    call_in_progress = true; // Ringing an incoming call
+                    is_call_ended = false;
                     ring_cycle_timer = now;
                     Serial.println("[RINGER] Ring signal received! Buzzer started.");
                 }
@@ -243,6 +258,15 @@ void loop() {
                 ctrl_udp.beginPacket(last_controller_ip, last_controller_port);
                 ctrl_udp.write((const uint8_t*)"BUZZ:OK\n", 8);
                 ctrl_udp.endPacket();
+            } else if (cmd == "PLAY:DONE") {
+                // Audio speech finished, enter telephone disconnect beep mode
+                is_call_ended = true;
+                busy_tone_timer = now;
+                Serial.printf("[CALL] PLAY:DONE received (hook=%s). Disconnect tone activated.\n",
+                              stable_picked_up ? "OFF-HOOK" : "ON-HOOK");
+                ctrl_udp.beginPacket(last_controller_ip, last_controller_port);
+                ctrl_udp.write((const uint8_t*)"TONE:START\n", 11);
+                ctrl_udp.endPacket();
             } else if (cmd == "STATUS?") {
                 ctrl_udp.beginPacket(last_controller_ip, last_controller_port);
                 ctrl_udp.printf("STATE:%s\n", (stable_picked_up ? "OFF_HOOK" : "ON_HOOK"));
@@ -251,16 +275,19 @@ void loop() {
         }
     }
 
-    // 4. Play audio packets from PC to MAX98357A I2S (only if handset is lifted!)
+    // 4. Audio Playback and Tones (only when handset is lifted off cradle)
+    if (!stable_picked_up) {
+        is_call_ended = false;
+        i2s_zero_dma_buffer(I2S_NUM);
+        return;
+    }
+
     int packet_size = audio_udp.parsePacket();
     if (packet_size > 0) {
+        // Active speech audio streaming from PC
+        is_call_ended = false;
+        last_audio_packet_time = now;
         int len = audio_udp.read((char*)udp_packet_buf, sizeof(udp_packet_buf));
-        
-        // If user hung up, discard audio packets and clear I2S DMA buffer immediately
-        if (!stable_picked_up) {
-            i2s_zero_dma_buffer(I2S_NUM);
-            return;
-        }
 
         int num_samples = len / sizeof(int16_t);
         int16_t* mono_samples = (int16_t*)udp_packet_buf;
@@ -272,6 +299,42 @@ void loop() {
 
         size_t bytes_written = 0;
         i2s_write(I2S_NUM, stereo_buf, num_samples * sizeof(int16_t) * 2, &bytes_written, portMAX_DELAY);
+    } else if (is_call_ended) {
+        // 5. Telephone Disconnect / Busy Tone (425 Hz, 0.5s ON / 0.5s OFF)
+        static uint32_t busy_phase = 0;
+        uint32_t cycle = (now - busy_tone_timer) % 1000;
+        bool tone_on = (cycle < 500); // 500ms beep, 500ms pause
+
+        int samples_to_gen = 128;
+        for (int i = 0; i < samples_to_gen; i++) {
+            int16_t sample = 0;
+            if (tone_on) {
+                float rad = (2.0f * 3.14159265f * 425.0f * (float)busy_phase) / (float)SAMPLE_RATE;
+                sample = (int16_t)(sinf(rad) * 12000.0f);
+                busy_phase++;
+            } else {
+                busy_phase = 0;
+            }
+            stereo_buf[i * 2]     = sample;
+            stereo_buf[i * 2 + 1] = sample;
+        }
+
+        size_t written = 0;
+        i2s_write(I2S_NUM, stereo_buf, samples_to_gen * sizeof(int16_t) * 2, &written, portMAX_DELAY);
+    } else if (!call_in_progress && !is_ringing && (now - last_audio_packet_time > 400)) {
+        // 6. Classic Telephone Dial Tone (Continuous 425 Hz "beeeeeeeep" when picked up and idle)
+        static uint32_t dial_phase = 0;
+        int samples_to_gen = 128;
+        for (int i = 0; i < samples_to_gen; i++) {
+            float rad = (2.0f * 3.14159265f * 425.0f * (float)dial_phase) / (float)SAMPLE_RATE;
+            int16_t sample = (int16_t)(sinf(rad) * 8000.0f); // Pleasant dial tone volume
+            dial_phase++;
+            stereo_buf[i * 2]     = sample;
+            stereo_buf[i * 2 + 1] = sample;
+        }
+
+        size_t written = 0;
+        i2s_write(I2S_NUM, stereo_buf, samples_to_gen * sizeof(int16_t) * 2, &written, portMAX_DELAY);
     }
 }
 

@@ -220,10 +220,59 @@ def test_mock_flow(esp_ip: str = ESP_IP, ctrl_port: int = CTRL_PORT, audio_port:
                 ctrl_sock.sendto(b"STATUS?\n", (esp_ip, ctrl_port))
 
         if answered:
-            print("\n[CALL CONNECTED] Handset lifted! Stopping buzzer and playing mock answer...")
+            print("\n[CALL CONNECTED] Handset lifted! Stopping buzzer and playing mock answer in 1 second...")
             ctrl_sock.sendto(b"RING:STOP\n", (esp_ip, ctrl_port))
-            time.sleep(0.3)
-            send_audio_stream(pcm_bytes, ctrl_sock=ctrl_sock, esp_ip=esp_ip, audio_port=audio_port)
+            time.sleep(1.0)
+            finished_speaking = send_audio_stream(pcm_bytes, ctrl_sock=ctrl_sock, esp_ip=esp_ip, audio_port=audio_port)
+            if finished_speaking:
+                print("\n[Call Complete] Playing telephone disconnect beep tone in earpiece until you hang up...")
+                ctrl_sock.sendto(b"PLAY:DONE\n", (esp_ip, ctrl_port))
+
+                # Generate 425 Hz disconnect tone cadence: 0.5s tone, 0.5s pause
+                import numpy as np
+                t_tone = np.linspace(0, 0.5, int(SAMPLE_RATE * 0.5), endpoint=False)
+                tone_samples = (np.sin(2 * np.pi * 425 * t_tone) * 12000).astype(np.int16)
+                silence_samples = np.zeros(int(SAMPLE_RATE * 0.5), dtype=np.int16)
+                cycle_pcm = np.concatenate([tone_samples, silence_samples]).tobytes()
+
+                tone_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                chunk_delay = (CHUNK_SAMPLES / SAMPLE_RATE) * 0.95
+                try:
+                    while True:
+                        cycle_offset = 0
+                        cycle_hung_up = False
+                        while cycle_offset < len(cycle_pcm):
+                            try:
+                                ctrl_sock.settimeout(0.001)
+                                data, _ = ctrl_sock.recvfrom(128)
+                                msg = data.decode("utf-8", errors="ignore").strip()
+                                if "HOOK:ON" in msg or "STATE:ON_HOOK" in msg:
+                                    cycle_hung_up = True
+                                    break
+                            except (socket.timeout, BlockingIOError):
+                                pass
+
+                            chunk = cycle_pcm[cycle_offset:cycle_offset + CHUNK_BYTES]
+                            tone_sock.sendto(chunk, (esp_ip, audio_port))
+                            cycle_offset += len(chunk)
+                            time.sleep(chunk_delay)
+
+                        if cycle_hung_up:
+                            print("[CALL DISCONNECTED] Handset placed back on cradle!\n")
+                            break
+
+                        try:
+                            ctrl_sock.sendto(b"STATUS?\n", (esp_ip, ctrl_port))
+                            ctrl_sock.settimeout(0.05)
+                            data, _ = ctrl_sock.recvfrom(128)
+                            msg = data.decode("utf-8", errors="ignore").strip()
+                            if "STATE:ON_HOOK" in msg:
+                                print("[CALL DISCONNECTED] Handset placed back on cradle!\n")
+                                break
+                        except (socket.timeout, BlockingIOError):
+                            pass
+                finally:
+                    tone_sock.close()
         else:
             print("\n[TIMEOUT] Call was not answered.")
             ctrl_sock.sendto(b"RING:STOP\n", (esp_ip, ctrl_port))

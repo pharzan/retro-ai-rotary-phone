@@ -33,9 +33,11 @@ def ask_ai(prompt: str) -> str:
     """Query high-speed Gemini API directly (~1.5-2.5s) using local gcloud auth, with fallback to agy."""
     print(f"\n[AI] Thinking: \"{prompt}\"...")
     system_instruction = (
-        "You are a friendly vintage telephone operator assistant. "
-        "Keep your response concise, spoken-style, and under 2 sentences. "
-        "Do not output markdown, bullet points, asterisks, or code."
+        "You are a friendly, conversational vintage telephone operator. "
+        "Speak naturally as if talking to a friend on a real phone call. "
+        "Use natural contractions (like I'm, that's, you'll) and conversational phrasing. "
+        "Keep your response concise, spoken-style, and strictly under 2 sentences. "
+        "Never output markdown, bullet points, asterisks, or code."
     )
 
     # 1. High-speed direct API path (1.5 - 2.5 seconds total latency)
@@ -93,17 +95,20 @@ def ask_ai(prompt: str) -> str:
 
 
 async def synthesize_speech(text: str, output_wav: str):
-    """Use Edge-TTS for high-quality natural voice and convert to 8000 Hz WAV."""
-    print("[TTS] Generating neural speech audio...")
-    voice = "en-US-GuyNeural"
+    """Use Edge-TTS with conversational neural voice and warm telephone acoustic filter."""
+    print("[TTS] Generating neural conversational speech...")
+    voice = "en-US-AndrewNeural"
     mp3_tmp = "/tmp/phone_tts_temp.mp3"
 
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(mp3_tmp)
 
+    # Use soxr high-quality sinc resampler with gentle telephone bandpass (300Hz-3400Hz)
+    # to eliminate harsh digital aliasing and give warm natural analog vocal presence
     cmd = [
         "ffmpeg", "-y", "-v", "error",
         "-i", mp3_tmp,
+        "-af", "aresample=resampler=soxr,highpass=f=200,lowpass=f=3600",
         "-ac", "1",
         "-ar", str(SAMPLE_RATE),
         "-f", "s16le",
@@ -143,10 +148,10 @@ def ring_and_wait_for_pickup(sock: socket.socket, esp_ip: str, ctrl_port: int = 
                 sock.sendto(b"STATUS?\n", (esp_ip, ctrl_port))
 
         if picked_up:
-            print("\n[CALL CONNECTED] Handset lifted off cradle! Starting playback...\n")
+            print("\n[CALL CONNECTED] Handset lifted off cradle! Starting playback in 1 second...\n")
             # Ensure ringer is stopped
             sock.sendto(b"RING:STOP\n", (esp_ip, ctrl_port))
-            time.sleep(0.3)  # Brief natural pause as user places earpiece to ear
+            time.sleep(1.0)  # 1.0s natural pause after pickup before speech begins
             return True
         else:
             print("\n[TIMEOUT] Nobody answered the telephone.")
@@ -200,7 +205,55 @@ def send_audio_network(esp_ip: str, audio_port: int, ctrl_sock: socket.socket, p
 
     audio_sock.close()
     if not hung_up:
-        print("[Audio] Playback complete! Place handset back on cradle.")
+        print("\n[Audio] Playback complete! Playing telephone disconnect beeps until you hang up...")
+        ctrl_sock.sendto(b"PLAY:DONE\n", (esp_ip, 5006))
+
+        # Generate 425 Hz disconnect tone cadence: 0.5s tone, 0.5s pause
+        t_tone = np.linspace(0, 0.5, int(SAMPLE_RATE * 0.5), endpoint=False)
+        tone_samples = (np.sin(2 * np.pi * 425 * t_tone) * 12000).astype(np.int16)
+        silence_samples = np.zeros(int(SAMPLE_RATE * 0.5), dtype=np.int16)
+        cycle_pcm = np.concatenate([tone_samples, silence_samples]).tobytes()
+
+        tone_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            while True:
+                # Stream one 1.0-second cycle of beep + silence in small chunks
+                cycle_offset = 0
+                cycle_hung_up = False
+                while cycle_offset < len(cycle_pcm):
+                    # Check if user placed handset on cradle
+                    try:
+                        ctrl_sock.settimeout(0.001)
+                        msg, _ = ctrl_sock.recvfrom(128)
+                        if b"HOOK:ON" in msg or b"STATE:ON_HOOK" in msg:
+                            cycle_hung_up = True
+                            break
+                    except (socket.timeout, BlockingIOError):
+                        pass
+
+                    chunk = cycle_pcm[cycle_offset:cycle_offset + CHUNK_BYTES]
+                    tone_sock.sendto(chunk, (esp_ip, audio_port))
+                    cycle_offset += len(chunk)
+                    time.sleep(chunk_delay)
+
+                if cycle_hung_up:
+                    print("[CALL ENDED] Handset placed back on cradle. Good bye!\n")
+                    break
+
+                # Poll hook status periodically in case event packet was lost
+                try:
+                    ctrl_sock.sendto(b"STATUS?\n", (esp_ip, 5006))
+                    ctrl_sock.settimeout(0.05)
+                    msg, _ = ctrl_sock.recvfrom(128)
+                    if b"STATE:ON_HOOK" in msg:
+                        print("[CALL ENDED] Handset placed back on cradle. Good bye!\n")
+                        break
+                except (socket.timeout, BlockingIOError):
+                    pass
+        except KeyboardInterrupt:
+            print("\nExited.")
+        finally:
+            tone_sock.close()
 
 
 
